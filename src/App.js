@@ -414,6 +414,120 @@ function ClientsView({clients, setClients}) {
   </div>;
 }
 
+// ── Modals Planning ──────────────────────────────────────────────────────────
+function SlotEditModal({slot, client, onSave, onClose, onRemove}) {
+  var [startH, setStartH] = useState(slot.startClock.split(":")[0]);
+  var [startM, setStartM] = useState(slot.startClock.split(":")[1]);
+  var [caissons, setCaissons] = useState(slot.nbrCaissons);
+  var [name, setName] = useState(client ? client.name : "");
+  var [address, setAddress] = useState(client ? client.address : "");
+  var [ville, setVille] = useState(client ? client.ville : "");
+  var [bon, setBon] = useState(client ? (client.bon||"") : "");
+
+  var handleSave = function() {
+    var startMin = parseInt(startH)*60 + parseInt(startM);
+    var dur = caissons * JOB;
+    var endMin = startMin + dur;
+    onSave({
+      slot: Object.assign({}, slot, {
+        startClock: fmt(startMin), endClock: fmt(endMin),
+        startMin: startMin, dur: dur, nbrCaissons: caissons,
+        overtime: endMin > WE
+      }),
+      clientPatch: {name, address, ville, bon}
+    });
+  };
+
+  var iStyle = {background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,padding:"7px 10px",fontSize:13,color:T.text,outline:"none",fontFamily:"inherit",width:"100%"};
+
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={onClose}>
+    <div style={{background:"#1a1a24",border:"1px solid rgba(255,255,255,0.12)",borderRadius:16,padding:24,width:"100%",maxWidth:480,boxShadow:"0 24px 64px rgba(0,0,0,0.6)",animation:"fadeIn 0.2s ease"}} onClick={function(e){e.stopPropagation();}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div style={{fontWeight:700,fontSize:15,color:T.text}}>Modifier le chantier</div>
+        <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:20,lineHeight:1}}>×</button>
+      </div>
+      <div style={{display:"grid",gap:12}}>
+        <div>
+          <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Client</div>
+          <input value={name} onChange={function(e){setName(e.target.value);}} placeholder="Nom du client" style={iStyle}/>
+        </div>
+        <div>
+          <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Adresse</div>
+          <input value={address} onChange={function(e){setAddress(e.target.value);}} placeholder="Adresse" style={iStyle}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Ville</div>
+            <input value={ville} onChange={function(e){setVille(e.target.value);}} placeholder="Ville" style={iStyle}/>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Bon / Réf</div>
+            <input value={bon} onChange={function(e){setBon(e.target.value);}} placeholder="Réf…" style={iStyle}/>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Heure de début</div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <input type="number" min="7" max="18" value={startH} onChange={function(e){setStartH(String(e.target.value).padStart(2,"0"));}} style={Object.assign({},iStyle,{width:60,textAlign:"center"})}/>
+              <span style={{color:T.muted}}>:</span>
+              <select value={startM} onChange={function(e){setStartM(e.target.value);}} style={Object.assign({},iStyle,{width:70})}>
+                {["00","15","30","45"].map(function(m){return <option key={m} value={m} style={{background:"#1a1a24"}}>{m}</option>;})}
+              </select>
+            </div>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Nb caissons</div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+              {[1,2,3,4,5,6].map(function(n){return <button key={n} onClick={function(){setCaissons(n);}} style={{width:34,height:34,borderRadius:7,border:"1px solid "+(caissons===n?"transparent":T.border),cursor:"pointer",fontWeight:600,fontSize:13,background:caissons===n?"#6366f1":"rgba(255,255,255,0.04)",color:caissons===n?"white":T.text,fontFamily:"inherit"}}>{n}</button>;})}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:20,justifyContent:"space-between"}}>
+        <Btn onClick={onRemove} variant="danger" size="sm">🗑 Retirer</Btn>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={onClose} variant="ghost" size="sm">Annuler</Btn>
+          <Btn onClick={handleSave} variant="primary" size="sm">Sauvegarder</Btn>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+function AddSlotModal({clients, planning, onAdd, onClose}) {
+  var [search, setSearch] = useState("");
+  var [selected, setSelected] = useState(null);
+  var usedIds = new Set();
+  if(planning) planning.journees.forEach(function(j){j.slots.forEach(function(sl){usedIds.add(sl.clientId);});});
+  var available = clients.filter(function(c){return c.status==="pending"&&!usedIds.has(c.id);});
+  var filtered = search ? available.filter(function(c){var q=norm(search);return norm(c.name).includes(q)||norm(c.ville||"").includes(q);}) : available;
+
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={onClose}>
+    <div style={{background:"#1a1a24",border:"1px solid rgba(255,255,255,0.12)",borderRadius:16,padding:24,width:"100%",maxWidth:480,boxShadow:"0 24px 64px rgba(0,0,0,0.6)",animation:"fadeIn 0.2s ease"}} onClick={function(e){e.stopPropagation();}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div style={{fontWeight:700,fontSize:15,color:T.text}}>Ajouter un chantier</div>
+        <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:20,lineHeight:1}}>×</button>
+      </div>
+      <Input value={search} onChange={function(e){setSearch(e.target.value);}} placeholder="Rechercher un client…" style={{marginBottom:12}}/>
+      <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+        {filtered.length===0&&<div style={{padding:20,textAlign:"center",color:T.muted,fontSize:13}}>Aucun client disponible</div>}
+        {filtered.slice(0,20).map(function(c){
+          var isSel=selected&&selected.id===c.id;
+          return <div key={c.id} onClick={function(){setSelected(isSel?null:c);}} style={{padding:"9px 12px",borderRadius:8,border:"1px solid "+(isSel?"rgba(99,102,241,0.5)":T.border),background:isSel?"rgba(99,102,241,0.1)":"rgba(255,255,255,0.02)",cursor:"pointer",transition:"all 0.15s"}}>
+            <div style={{fontWeight:600,fontSize:13,color:T.text}}>{c.name}</div>
+            <div style={{fontSize:11,color:T.muted}}>{c.address} · {c.ville} · {c.nbrCaissons}c</div>
+          </div>;
+        })}
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:16,justifyContent:"flex-end"}}>
+        <Btn onClick={onClose} variant="ghost" size="sm">Annuler</Btn>
+        <Btn onClick={function(){if(selected)onAdd(selected);}} variant="primary" size="sm" disabled={!selected}>Ajouter</Btn>
+      </div>
+    </div>
+  </div>;
+}
+
 function SlotRow({slot, client, onCheck, onPartial, onEdit}) {
   var [open,setOpen]=useState(false);
   var [nb,setNb]=useState(slot.nbrCaissons);
@@ -508,7 +622,7 @@ function GpsButton({journee, clients}) {
   </div>;
 }
 
-function PlanningView({clients, planning, setPlanning, otMin, setOtMin, onGenerate, onCheck, onPartial, techs, setTechs, journeeDates, setJourneeDate}) {
+function PlanningView({clients, setClients, planning, setPlanning, otMin, setOtMin, onGenerate, onCheck, onPartial, techs, setTechs, journeeDates, setJourneeDate}) {
   var cMap={};clients.forEach(function(c){cMap[c.id]=c;});
   var pending=clients.filter(function(c){return c.status==="pending";}).length;
   var [filtre,setFiltre]=useState("all");
@@ -561,6 +675,7 @@ function PlanningView({clients, planning, setPlanning, otMin, setOtMin, onGenera
 
   // Sauvegarder les modifs d'un slot (heure, caissons, infos client)
   var saveSlotEdit = function(jId, sIdx, slotPatch, clientPatch) {
+    // Mettre à jour le slot dans le planning
     updatePlanning(function(prev){
       var newJ=prev.journees.map(function(j){
         if(j.id!==jId)return j;
@@ -569,14 +684,23 @@ function PlanningView({clients, planning, setPlanning, otMin, setOtMin, onGenera
       });
       return Object.assign({},prev,{journees:rebuildJournee(newJ)});
     });
-    // Patch le client aussi
-    if(clientPatch && Object.keys(clientPatch).length>0) {
-      var sl = planning.journees.find(function(j){return j.id===jId;});
-      if(sl) {
-        var slot = sl.slots[sIdx];
-        if(slot) {
-          setPlanning(function(prev){return prev;}); // trigger already done above
-        }
+    // Mettre à jour le client (nom, adresse, ville, bon)
+    if(clientPatch && slotPatch && slotPatch.clientId) {
+      setClients(function(prev){
+        return prev.map(function(c){
+          return c.id===slotPatch.clientId ? Object.assign({},c,clientPatch) : c;
+        });
+      });
+    } else if(clientPatch) {
+      // Trouver le clientId depuis le slot original
+      var j = planning.journees.find(function(j){return j.id===jId;});
+      if(j && j.slots[sIdx]) {
+        var cid = j.slots[sIdx].clientId;
+        setClients(function(prev){
+          return prev.map(function(c){
+            return c.id===cid ? Object.assign({},c,clientPatch) : c;
+          });
+        });
       }
     }
     setEditModal(null);
@@ -1213,7 +1337,7 @@ function ModuleApp({mod, userId}) {
       {view==="dashboard"&&<Dashboard clients={clients} planning={planning} currentYear={currentYear} onImport={function(){setView("import");}} onPlan={handleGenerate} onNewYear={function(){handleSetYear(currentYear+1);}} onCarte={function(){setView("carte");}}/>}
       {view==="import"&&<ImportView onConfirm={handleConfirmImport} fileRef={fileRef} loading={impLoading} error={impError} result={impResult} pending={impPending} onReset={handleResetImport} onDrop={function(e){e.preventDefault();var f=e.dataTransfer.files[0];if(f)handleFile(f);}}/>}
       {view==="clients"&&<ClientsView clients={clients} setClients={setClients}/>}
-      {view==="planning"&&<PlanningView clients={clients} planning={planning} setPlanning={setPlanning} otMin={otMin} setOtMin={setOtMin} onGenerate={handleGenerate} onCheck={handleCheck} onPartial={handlePartial} techs={techs} setTechs={setTechs} journeeDates={journeeDates} setJourneeDate={function(jId,date){setJourneeDates(function(prev){var n=Object.assign({},prev);n[jId]=date;return n;});}}/>}
+      {view==="planning"&&<PlanningView clients={clients} setClients={setClients} planning={planning} setPlanning={setPlanning} otMin={otMin} setOtMin={setOtMin} onGenerate={handleGenerate} onCheck={handleCheck} onPartial={handlePartial} techs={techs} setTechs={setTechs} journeeDates={journeeDates} setJourneeDate={function(jId,date){setJourneeDates(function(prev){var n=Object.assign({},prev);n[jId]=date;return n;});}}/>}
       {view==="carte"&&<CarteView clients={clients} planning={planning}/>}
       {view==="annees"&&<AnneesView currentYear={currentYear} clients={clients} onNewYear={function(){handleSetYear(currentYear+1);}} onSetYear={handleSetYear} modPre={PRE}/>}
       {view==="kizeo"&&<KizeoView clients={clients} planning={planning} onCheck={handleCheck}/>}
