@@ -56,9 +56,63 @@ function today(){return new Date().toISOString().split("T")[0];}
 
 function fusionner(existing,rows){var seen={},uniq=[],dups=[];rows.forEach(function(r){var k=cKey(r.name,r.address);if(seen[k])dups.push(r);else{seen[k]=true;uniq.push(r);}});var stats={added:0,reactivated:0,alreadyDone:0,pending:0,deactivated:0,dups:dups.length};var updated=existing.map(function(c){var k=cKey(c.name,c.address);var m=uniq.find(function(r){return cKey(r.name,r.address)===k;});var u=m?{cp:m.cp||c.cp,ville:m.ville||c.ville,nbrCaissons:m.nbrCaissons||c.nbrCaissons,bon:m.bon||c.bon}:{};if(seen[k]){if(c.status==="done"){stats.alreadyDone++;return Object.assign({},c,u);}if(c.status==="inactive"){stats.reactivated++;return Object.assign({},c,u,{status:"pending"});}stats.pending++;return Object.assign({},c,u);}else{var had=(c.history||[]).length>0||c.status==="done";if(c.status==="pending"&&!had){stats.deactivated++;return Object.assign({},c,{status:"inactive"});}return c;}});var ex={};updated.forEach(function(c){ex[cKey(c.name,c.address)]=true;});uniq.forEach(function(r){if(!ex[cKey(r.name,r.address)]){updated.push({id:uid(),name:r.name,address:r.address,cp:r.cp||"",ville:r.ville||"",nbrCaissons:r.nbrCaissons||1,bon:r.bon||"",status:"pending",year:new Date().getFullYear(),doneDate:null,history:[]});stats.added++;}});return{clients:updated,stats,total:rows.length};}
 
-function geocodeWithAI(batch){var liste=batch.map(function(c){return{id:c.id,adr:[c.address,c.cp,c.ville].filter(Boolean).join(", ")};});var prompt="Coordonnees GPS France. JSON uniquement: {\"id1\":{\"lat\":43.6,\"lon\":1.44},...}. Adresses: "+JSON.stringify(liste);return fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})}).then(function(res){if(!res.ok)throw new Error("API "+res.status);return res.json();}).then(function(data){var raw=data.content&&data.content.map(function(b){return b.text||"";}).join("").trim();var m=raw.match(/\{[\s\S]*\}/);if(!m)throw new Error("No JSON");return JSON.parse(m[0]);});}
+// Géocodage via Nominatim (OpenStreetMap) - gratuit, pas de CORS, pas de clé API
+function geocodeWithAI(batch){
+  // Géocode un batch de clients un par un via Nominatim
+  var results = {};
+  var delay = function(ms){ return new Promise(function(r){setTimeout(r,ms);}); };
+  var geocodeOne = function(i){
+    if(i >= batch.length) return Promise.resolve(results);
+    var c = batch[i];
+    var adr = [c.address, c.cp, c.ville, "France"].filter(Boolean).join(", ");
+    var url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(adr);
+    return fetch(url, {headers:{"User-Agent":"AHMP-ProPlan/1.0"}})
+      .then(function(r){return r.json();})
+      .then(function(data){
+        if(data && data[0]){
+          results[c.id] = {lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon)};
+        } else {
+          // Essai simplifié avec juste CP + ville
+          var url2 = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent((c.cp||"") + " " + (c.ville||"") + " France");
+          return fetch(url2, {headers:{"User-Agent":"AHMP-ProPlan/1.0"}})
+            .then(function(r2){return r2.json();})
+            .then(function(data2){
+              if(data2 && data2[0]) results[c.id] = {lat: parseFloat(data2[0].lat), lon: parseFloat(data2[0].lon)};
+            });
+        }
+      })
+      .catch(function(){}) // ignorer les erreurs individuelles
+      .then(function(){ return delay(1100); }) // respecter le rate limit Nominatim (1 req/sec)
+      .then(function(){ return geocodeOne(i+1); });
+  };
+  return geocodeOne(0);
+}
 
-function buildGMapsUrl(slots,clients,coords){var cm={};clients.forEach(function(c){cm[c.id]=c;});var pts=slots.map(function(sl){var c=cm[sl.clientId];if(!c)return null;var p=coords[c.id];return p?p.lat+","+p.lon:c.address+" "+c.ville;}).filter(Boolean);if(!pts.length)return null;if(pts.length===1)return "https://www.google.com/maps/dir/?api=1&destination="+encodeURIComponent(pts[0]);var url="https://www.google.com/maps/dir/?api=1&origin="+encodeURIComponent(pts[0])+"&destination="+encodeURIComponent(pts[pts.length-1]);var wps=pts.slice(1,-1);if(wps.length)url+="&waypoints="+wps.map(encodeURIComponent).join("|");return url+"&travelmode=driving";}
+function buildGMapsUrl(slots,clients,coords){
+  var cm={};clients.forEach(function(c){cm[c.id]=c;});
+  var pts=slots.map(function(sl){
+    var c=cm[sl.clientId];if(!c)return null;
+    var p=coords[c.id];
+    return p?(p.lat+","+p.lon):(c.address?encodeURIComponent(c.address+" "+c.ville):null);
+  }).filter(Boolean);
+  if(!pts.length)return null;
+  if(pts.length===1)return "https://www.google.com/maps/dir/?api=1&destination="+encodeURIComponent(pts[0]);
+  // Google Maps gratuit : max 10 waypoints (origin + 8 WP + destination = 10 points)
+  var MAX_WP = 8;
+  var origin = pts[0];
+  var destination = pts[pts.length-1];
+  var middle = pts.slice(1,-1);
+  // Si trop de points, on garde les plus espacés uniformément
+  if(middle.length > MAX_WP){
+    var step = middle.length / MAX_WP;
+    var sampled = [];
+    for(var i=0;i<MAX_WP;i++) sampled.push(middle[Math.floor(i*step)]);
+    middle = sampled;
+  }
+  var url = "https://www.google.com/maps/dir/?api=1&origin="+encodeURIComponent(origin)+"&destination="+encodeURIComponent(destination);
+  if(middle.length) url += "&waypoints="+middle.map(encodeURIComponent).join("|");
+  return url+"&travelmode=driving";
+}
 
 function recalcSlotTimes(slots){var cursor=WS,cumWork=0,pauseDone=false;return slots.map(function(sl){var d=sl.dur;if(!pauseDone&&cumWork>=PAUSE_AT){cursor=cursor-GAP+PAUSE;pauseDone=true;}var s=cursor,e=cursor+d;cursor=e+GAP;cumWork+=d;return Object.assign({},sl,{startClock:fmt(s),endClock:fmt(e),startMin:s,overtime:e>WE});});}
 
@@ -962,11 +1016,25 @@ function CarteView({clients, planning}) {
     if(!todo.length)return;
     setLoading(true);
     var nc=Object.assign({},coords);
-    var doNext=function(i){
-      if(i>=todo.length){setCoords(Object.assign({},nc));S.set(GEOCODE_KEY,nc);setProg({done:todo.length,total:todo.length});setLoading(false);handleFit();return;}
-      var batch=todo.slice(i,i+50);setProg({done:i,total:todo.length});
-      geocodeWithAI(batch).then(function(res){Object.assign(nc,res);setCoords(Object.assign({},nc));S.set(GEOCODE_KEY,nc);}).catch(function(e){console.error(e);}).then(function(){setTimeout(function(){doNext(i+50);},500);});
-    };doNext(0);
+    // Nominatim: 1 requête/seconde, on géocode un par un avec progression
+    setProg({done:0,total:todo.length});
+    geocodeWithAI(todo).then(function(res){
+      Object.assign(nc,res);
+      setCoords(Object.assign({},nc));
+      S.set(GEOCODE_KEY,nc);
+      setProg({done:todo.length,total:todo.length});
+      setLoading(false);
+      handleFit();
+    }).catch(function(e){
+      console.error(e);
+      setLoading(false);
+    });
+    // Mettre à jour la progression pendant le géocodage
+    var progInterval = setInterval(function(){
+      var done = Object.keys(nc).length;
+      setProg(function(p){return done < todo.length ? {done:done,total:todo.length} : p;});
+    }, 1200);
+    setTimeout(function(){clearInterval(progInterval);}, todo.length * 1200 + 5000);
   };
   var handleFit=function(){
     var pts=clients.filter(function(c){return coords[c.id]&&!isNaN(coords[c.id].lat);});
