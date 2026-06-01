@@ -4,7 +4,7 @@ var SUPA_URL = "https://ycdptnmznauyzckqepuu.supabase.co";
 var SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InljZHB0bm16bmF1eXpja3FlcHV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyODE3OTYsImV4cCI6MjA4OTg1Nzc5Nn0.SDWgUox2BcLSQB0s4JcplemTuq-NuidS5wv0ro2P30s";
 
 var supa = {
-  _h: function(){ return {"apikey":SUPA_KEY,"Authorization":"Bearer "+(SUPA_KEY),"Content-Type":"application/json","Prefer":"return=representation"}; },
+  _h: function(){ return {"apikey":SUPA_KEY,"Authorization":"Bearer "+(_token||SUPA_KEY),"Content-Type":"application/json","Prefer":"return=representation"}; },
   from: function(table){
     var base=SUPA_URL+"/rest/v1/"+table;
     return {
@@ -1347,19 +1347,25 @@ function ModuleApp({mod, userId}) {
 }
 
 // ── Root App ──────────────────────────────────────────────────────────────────
-var GUEST_USER = (function(){
-  var k = "proplan_guest_id";
-  try {
-    var existing = localStorage.getItem(k);
-    if(existing) return {email:"local", id:existing};
-    var newId = "guest_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem(k, newId);
-    return {email:"local", id:newId};
-  } catch(e) { return {email:"local", id:"guest_default"}; }
-})();
-
 export default function App() {
   var [mod,setMod]=useState("vmc");
+  var [user,setUser]=useState(null);
+  var [authChecked,setAuthChecked]=useState(false);
+
+  useEffect(function(){
+    if(loadSession()){
+      var s=supa.auth.getSession();
+      if(s)setUser({email:s.email,id:s.userId});
+    }
+    setAuthChecked(true);
+  },[]);
+
+  var handleLogout=function(){
+    supa.auth.signOut().then(function(){setUser(null);});
+  };
+
+  if(!authChecked)return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg,color:T.muted,fontFamily:"'DM Sans',sans-serif"}}>…</div>;
+  if(!user)return <LoginScreen onLogin={function(u){setUser(u);}}/>;
 
   return <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",background:T.bg}}>
     <style>{css}</style>
@@ -1376,7 +1382,11 @@ export default function App() {
           </button>;
         })}
       </div>
+      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
+        <span style={{color:T.muted,fontSize:12,fontFamily:"monospace"}}>{user.email}</span>
+        <Btn onClick={handleLogout} variant="ghost" size="sm">Déconnexion</Btn>
+      </div>
     </header>
-    <ModuleApp key={mod} mod={mod} userId={GUEST_USER.id}/>
+    <ModuleApp key={mod+user.id} mod={mod} userId={user.id}/>
   </div>;
 }
