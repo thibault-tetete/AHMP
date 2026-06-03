@@ -121,15 +121,51 @@ function fmtDate(d){if(!d)return null;var dt=new Date(d);var days=["Dim","Lun","
 function saveSession(data){_token=data.access_token;_userId=data.user&&data.user.id;try{localStorage.setItem("supa_session",JSON.stringify({token:data.access_token,userId:_userId,email:data.user&&data.user.email,expires_at:data.expires_at}));}catch(e){}}
 function loadSession(){var s=supa.auth.getSession();if(!s)return false;if(s.expires_at&&new Date(s.expires_at*1000)<new Date())return false;_token=s.token;_userId=s.userId;return true;}
 
-function syncClientsToSupabase(clients,module,userId){if(!userId)return Promise.resolve();var rows=clients.map(function(c){return{id:c.id,user_id:userId,name:c.name,address:c.address,cp:c.cp||"",ville:c.ville||"",nbr_caissons:c.nbrCaissons||1,bon:c.bon||"",status:c.status,year:c.year||new Date().getFullYear(),done_date:c.doneDate||null,history:c.history||[],module};});return supa.from("clients").upsert(rows).catch(function(e){console.error("sync clients",e);});}
-function loadClientsFromSupabase(module,userId){if(!userId)return Promise.resolve(null);return supa.from("clients").select("*","&user_id=eq."+userId+"&module=eq."+module).then(function(rows){if(!Array.isArray(rows))return null;return rows.map(function(r){return{id:r.id,name:r.name,address:r.address,cp:r.cp||"",ville:r.ville||"",nbrCaissons:r.nbr_caissons||1,bon:r.bon||"",status:r.status,year:r.year,doneDate:r.done_date,history:r.history||[]};});}).catch(function(e){console.error("load clients",e);return null;});}
-function syncArchiveToSupabase(module,year,data,userId){if(!userId)return Promise.resolve();return supa.from("archives").upsert({user_id:userId,module,year,data}).catch(function(e){console.error("sync archive",e);});}
+function syncClientsToSupabase(clients,module,userId,orgId){if(!userId)return Promise.resolve();var rows=clients.map(function(c){return{id:c.id,user_id:userId,org_id:orgId||null,name:c.name,address:c.address,cp:c.cp||"",ville:c.ville||"",nbr_caissons:c.nbrCaissons||1,bon:c.bon||"",status:c.status,year:c.year||new Date().getFullYear(),done_date:c.doneDate||null,history:c.history||[],module};});return supa.from("clients").upsert(rows).catch(function(e){console.error("sync clients",e);});}
+function loadClientsFromSupabase(module,userId,orgId){if(!userId)return Promise.resolve(null);var filter=orgId?("&org_id=eq."+orgId+"&module=eq."+module):("&user_id=eq."+userId+"&module=eq."+module);return supa.from("clients").select("*",filter).then(function(rows){if(!Array.isArray(rows))return null;return rows.map(function(r){return{id:r.id,name:r.name,address:r.address,cp:r.cp||"",ville:r.ville||"",nbrCaissons:r.nbr_caissons||1,bon:r.bon||"",status:r.status,year:r.year,doneDate:r.done_date,history:r.history||[]};});}).catch(function(e){console.error("load clients",e);return null;});}
+function syncArchiveToSupabase(module,year,data,userId,orgId){if(!userId)return Promise.resolve();return supa.from("archives").upsert({user_id:userId,org_id:orgId||null,module,year,data}).catch(function(e){console.error("sync archive",e);});}
 
 var MODULES={
   vmc:{id:"vmc",label:"VMC",emoji:"💨",accent:"#6366f1",dark:"#4338ca",desc:"Nettoyage ventilation"},
   era:{id:"era",label:"Éradication",emoji:"🐛",accent:"#10b981",dark:"#059669",desc:"Nuisibles",
     interventionTypes:[{id:"init",label:"Initial",min:60},{id:"ctrl",label:"Contrôle",min:30},{id:"choc",label:"Choc",min:45},{id:"fin",label:"Levée",min:20}]},
 };
+
+
+// ── Organisation & Rôles ─────────────────────────────────────────────────────
+function genInviteCode(){
+  var chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  var code="";for(var i=0;i<8;i++)code+=chars[Math.floor(Math.random()*chars.length)];
+  return code;
+}
+function createOrg(name, userId){
+  var org={id:uid(),name:name,invite_code:genInviteCode(),owner_id:userId};
+  return supa.from("organisations").upsert(org).then(function(){return org;});
+}
+function joinOrg(inviteCode, userId, email){
+  return supa.from("organisations").select("*","&invite_code=eq."+inviteCode)
+    .then(function(rows){
+      if(!rows||!rows.length)throw new Error("Code invalide");
+      var org=rows[0];
+      return supa.from("membres").upsert({user_id:userId,org_id:org.id,role:"technicien",email:email})
+        .then(function(){return org;});
+    });
+}
+function getMyMembre(userId){
+  return supa.from("membres").select("*","&user_id=eq."+userId)
+    .then(function(rows){return rows&&rows.length?rows[0]:null;});
+}
+function getOrgMembres(orgId){
+  return supa.from("membres").select("*","&org_id=eq."+orgId);
+}
+function promoteToAdmin(userId, orgId){
+  return fetch(SUPA_URL+"/rest/v1/membres?user_id=eq."+userId+"&org_id=eq."+orgId,
+    {method:"PATCH",headers:Object.assign({},supa._h(),{"Prefer":"return=representation"}),
+     body:JSON.stringify({role:"admin"})}).then(function(r){return r.json();});
+}
+function removeMembre(userId, orgId){
+  return supa.from("membres").delete("user_id=eq."+userId+"&org_id=eq."+orgId);
+}
 
 // ── Design Tokens ───────────────────────────────────────────────────────────
 var T = {
@@ -273,6 +309,219 @@ function LoginScreen({onLogin}) {
         </div>
       </Card>
     </div>
+  </div>;
+}
+
+
+// ── Écran setup organisation ──────────────────────────────────────────────────
+function OrgSetup({user, onReady}) {
+  var [mode, setMode] = useState("choice"); // choice | create | join
+  var [orgName, setOrgName] = useState("");
+  var [inviteCode, setInviteCode] = useState("");
+  var [loading, setLoading] = useState(false);
+  var [err, setErr] = useState("");
+
+  var handleCreate = function(){
+    if(!orgName.trim()){setErr("Nom requis");return;}
+    setLoading(true);setErr("");
+    createOrg(orgName.trim(), user.id)
+      .then(function(org){
+        return supa.from("membres").upsert({user_id:user.id,org_id:org.id,role:"admin",email:user.email})
+          .then(function(){return org;});
+      })
+      .then(function(org){
+        onReady({org_id:org.id, role:"admin", org_name:org.name, invite_code:org.invite_code});
+      })
+      .catch(function(e){setErr(e.message);})
+      .then(function(){setLoading(false);});
+  };
+
+  var handleJoin = function(){
+    if(!inviteCode.trim()){setErr("Code requis");return;}
+    setLoading(true);setErr("");
+    joinOrg(inviteCode.trim().toUpperCase(), user.id, user.email)
+      .then(function(org){
+        onReady({org_id:org.id, role:"technicien", org_name:org.name, invite_code:org.invite_code});
+      })
+      .catch(function(e){setErr(e.message);})
+      .then(function(){setLoading(false);});
+  };
+
+  var iStyle={background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"10px 14px",fontSize:14,color:T.text,outline:"none",fontFamily:"inherit",width:"100%"};
+
+  return <div style={{minHeight:"100vh",background:T.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+    <div style={{width:"100%",maxWidth:420,animation:"fadeIn 0.4s ease"}}>
+      <div style={{textAlign:"center",marginBottom:32}}>
+        <div style={{width:56,height:56,background:"linear-gradient(135deg,#6366f1,#8b5cf6)",borderRadius:16,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:"white",fontSize:26,margin:"0 auto 16px",boxShadow:"0 8px 32px rgba(99,102,241,0.4)"}}>A</div>
+        <div style={{fontWeight:700,fontSize:22,color:T.text}}>Bienvenue sur AHMP</div>
+        <div style={{color:T.muted,fontSize:13,marginTop:6}}>Rejoignez ou créez une organisation</div>
+      </div>
+      <Card padding="28px">
+        {mode==="choice"&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <button onClick={function(){setMode("create");}} style={{padding:"16px",background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.3)",borderRadius:10,cursor:"pointer",textAlign:"left",fontFamily:"inherit",transition:"all 0.15s"}}
+            onMouseEnter={function(e){e.currentTarget.style.background="rgba(99,102,241,0.2)";}}
+            onMouseLeave={function(e){e.currentTarget.style.background="rgba(99,102,241,0.1)";}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#a5b4fc",marginBottom:4}}>🏢 Créer une organisation</div>
+            <div style={{fontSize:12,color:T.muted}}>Je suis admin — je veux gérer une équipe</div>
+          </button>
+          <button onClick={function(){setMode("join");}} style={{padding:"16px",background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:10,cursor:"pointer",textAlign:"left",fontFamily:"inherit",transition:"all 0.15s"}}
+            onMouseEnter={function(e){e.currentTarget.style.background="rgba(16,185,129,0.15)";}}
+            onMouseLeave={function(e){e.currentTarget.style.background="rgba(16,185,129,0.08)";}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#10b981",marginBottom:4}}>🔗 Rejoindre une organisation</div>
+            <div style={{fontSize:12,color:T.muted}}>J'ai un code d'invitation de mon admin</div>
+          </button>
+        </div>}
+
+        {mode==="create"&&<div>
+          <div style={{fontWeight:600,fontSize:15,color:T.text,marginBottom:16}}>Créer mon organisation</div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>Nom de l'organisation</div>
+            <input value={orgName} onChange={function(e){setOrgName(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")handleCreate();}} placeholder="Ex: AHMP Toulouse" style={iStyle}/>
+          </div>
+          {err&&<div style={{background:"#ef444415",border:"1px solid #ef444430",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#ef4444",marginBottom:12}}>{err}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={handleCreate} variant="primary" disabled={loading} style={{flex:1,justifyContent:"center"}}>{loading?"…":"Créer"}</Btn>
+            <Btn onClick={function(){setMode("choice");setErr("");}} variant="ghost">Retour</Btn>
+          </div>
+        </div>}
+
+        {mode==="join"&&<div>
+          <div style={{fontWeight:600,fontSize:15,color:T.text,marginBottom:16}}>Rejoindre une organisation</div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:T.muted,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>Code d'invitation</div>
+            <input value={inviteCode} onChange={function(e){setInviteCode(e.target.value.toUpperCase());}} onKeyDown={function(e){if(e.key==="Enter")handleJoin();}} placeholder="Ex: AHMP1234" style={Object.assign({},iStyle,{fontFamily:"monospace",fontSize:18,textAlign:"center",letterSpacing:"0.1em"})}/>
+          </div>
+          {err&&<div style={{background:"#ef444415",border:"1px solid #ef444430",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#ef4444",marginBottom:12}}>{err}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={handleJoin} variant="primary" disabled={loading} style={{flex:1,justifyContent:"center"}}>{loading?"…":"Rejoindre"}</Btn>
+            <Btn onClick={function(){setMode("choice");setErr("");}} variant="ghost">Retour</Btn>
+          </div>
+        </div>}
+      </Card>
+    </div>
+  </div>;
+}
+
+// ── Vue Technicien (lecture seule de ses journées) ────────────────────────────
+function TechView({user, membre, planning, clients, onCheck, onPartial}) {
+  var myJournees = (planning&&planning.journees||[]).filter(function(j){
+    return j.techId === user.id || j.techName === membre.name;
+  });
+  var cMap={};clients.forEach(function(c){cMap[c.id]=c;});
+
+  if(!myJournees.length) return <div style={{textAlign:"center",padding:60,animation:"fadeIn 0.3s ease"}}>
+    <div style={{fontSize:48,marginBottom:16}}>📋</div>
+    <div style={{fontWeight:600,fontSize:18,color:T.text,marginBottom:8}}>Aucune journée assignée</div>
+    <div style={{color:T.muted,fontSize:14}}>Votre admin n'a pas encore planifié vos interventions</div>
+  </div>;
+
+  var JOUR_COLORS=["#6366f1","#8b5cf6","#06b6d4","#10b981","#f59e0b","#f97316","#ef4444","#ec4899"];
+  return <div style={{animation:"fadeIn 0.3s ease"}}>
+    <div style={{marginBottom:24}}>
+      <div style={{fontSize:11,color:"#6366f1",fontWeight:600,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:6}}>Mes interventions</div>
+      <div style={{fontSize:26,fontWeight:700,color:T.text,letterSpacing:"-0.02em"}}>Bonjour 👋</div>
+      <div style={{fontSize:13,color:T.muted,marginTop:4}}>{myJournees.length} journée{myJournees.length>1?"s":""} · {myJournees.reduce(function(s,j){return s+j.slots.length;},0)} chantiers</div>
+    </div>
+    {myJournees.map(function(j,ji){
+      var color=JOUR_COLORS[ji%JOUR_COLORS.length];
+      var tw=j.totalWork,hh=Math.floor(tw/60),mm=String(tw%60).padStart(2,"0");
+      return <div key={j.id} style={{background:T.bgCard,border:"1px solid "+T.border,borderRadius:14,marginBottom:12,overflow:"hidden"}}>
+        <div style={{padding:"14px 18px",borderBottom:"1px solid "+T.border,background:"rgba(255,255,255,0.02)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+            <div style={{width:3,height:22,background:color,borderRadius:2}}/>
+            <span style={{fontWeight:700,fontSize:14,color:T.text}}>Journée {j.num}</span>
+            {j.overtime&&<Badge color="#ef4444">Heures supp.</Badge>}
+          </div>
+          <div style={{fontSize:11,color:T.muted,fontFamily:"monospace"}}>
+            {j.slots.length} chantiers · {hh}h{mm} · fin {j.finHeure}
+            {j.departTime&&<> · départ {j.departTime}</>}
+          </div>
+        </div>
+        <div style={{padding:"10px 14px"}}>
+          {j.slots.map(function(sl,si){
+            var c=cMap[sl.clientId];
+            if(!c)return null;
+            return <SlotRow key={j.id+"-"+si} slot={sl} client={c} onCheck={onCheck} onPartial={onPartial} onEdit={function(){}}/>;
+          })}
+        </div>
+      </div>;
+    })}
+  </div>;
+}
+
+// ── Vue Admin Membres ─────────────────────────────────────────────────────────
+function MembresView({membre, orgId}) {
+  var [membres, setMembres] = useState([]);
+  var [loading, setLoading] = useState(true);
+  var [inviteCode, setInviteCode] = useState("");
+  var [copied, setCopied] = useState(false);
+
+  useEffect(function(){
+    // Charger le code d'invitation de l'orga
+    supa.from("organisations").select("*","&id=eq."+orgId).then(function(rows){
+      if(rows&&rows[0])setInviteCode(rows[0].invite_code);
+    });
+    // Charger les membres
+    getOrgMembres(orgId).then(function(rows){
+      setMembres(rows||[]);
+      setLoading(false);
+    });
+  },[orgId]);
+
+  var copyCode = function(){
+    try{navigator.clipboard.writeText(inviteCode);}catch(e){}
+    setCopied(true);setTimeout(function(){setCopied(false);},2000);
+  };
+
+  var handlePromote = function(userId){
+    promoteToAdmin(userId, orgId).then(function(){
+      setMembres(function(prev){return prev.map(function(m){return m.user_id===userId?Object.assign({},m,{role:"admin"}):m;});});
+    });
+  };
+
+  var handleRemove = function(userId){
+    if(!window.confirm("Retirer ce membre ?"))return;
+    removeMembre(userId, orgId).then(function(){
+      setMembres(function(prev){return prev.filter(function(m){return m.user_id!==userId;});});
+    });
+  };
+
+  return <div style={{animation:"fadeIn 0.3s ease"}}>
+    <div style={{marginBottom:22}}>
+      <div style={{fontSize:11,color:"#6366f1",fontWeight:600,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:6}}>Organisation</div>
+      <div style={{fontSize:28,fontWeight:700,color:T.text,letterSpacing:"-0.02em"}}>Membres</div>
+    </div>
+
+    <Card padding="18px 20px" style={{marginBottom:14,background:"rgba(99,102,241,0.06)",border:"1px solid rgba(99,102,241,0.2)"}}>
+      <div style={{fontSize:11,color:"#6366f1",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Code d'invitation</div>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{fontFamily:"monospace",fontSize:24,fontWeight:800,color:T.text,letterSpacing:"0.1em",background:"rgba(255,255,255,0.06)",padding:"10px 18px",borderRadius:8,border:"1px solid "+T.border}}>{inviteCode||"…"}</div>
+        <Btn onClick={copyCode} variant={copied?"success":"secondary"} size="sm">{copied?"✓ Copié !":"Copier"}</Btn>
+      </div>
+      <div style={{fontSize:12,color:T.muted,marginTop:8}}>Partagez ce code à vos techniciens pour qu'ils rejoignent l'organisation</div>
+    </Card>
+
+    <Card padding="0">
+      {loading&&<div style={{padding:24,textAlign:"center",color:T.muted}}>Chargement…</div>}
+      {!loading&&membres.length===0&&<div style={{padding:24,textAlign:"center",color:T.muted}}>Aucun membre</div>}
+      {membres.map(function(m,i){
+        var isMe = m.user_id === membre.user_id;
+        return <div key={m.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 18px",borderBottom:i<membres.length-1?"1px solid "+T.border:"none"}}>
+          <div style={{width:36,height:36,borderRadius:"50%",background:m.role==="admin"?"rgba(99,102,241,0.2)":"rgba(16,185,129,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:700,color:m.role==="admin"?"#a5b4fc":"#10b981",flexShrink:0}}>
+            {(m.email||"?").charAt(0).toUpperCase()}
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:13,fontWeight:600,color:T.text}}>{m.email||"Utilisateur"}{isMe&&<span style={{fontSize:11,color:T.muted,fontWeight:400}}> (moi)</span>}</div>
+            <div style={{fontSize:11,color:T.muted,marginTop:2}}>Membre depuis le {m.created_at?new Date(m.created_at).toLocaleDateString("fr-FR"):"?"}</div>
+          </div>
+          <Badge color={m.role==="admin"?"#6366f1":"#10b981"}>{m.role==="admin"?"Admin":"Technicien"}</Badge>
+          {!isMe&&membre.role==="admin"&&<div style={{display:"flex",gap:6}}>
+            {m.role==="technicien"&&<Btn onClick={function(){handlePromote(m.user_id);}} variant="ghost" size="sm">→ Admin</Btn>}
+            <Btn onClick={function(){handleRemove(m.user_id);}} variant="danger" size="sm">Retirer</Btn>
+          </div>}
+        </div>;
+      })}
+    </Card>
   </div>;
 }
 
@@ -1326,7 +1575,7 @@ function KizeoView({clients, planning, onCheck}) {
 }
 
 // ── Module App ────────────────────────────────────────────────────────────────
-function ModuleApp({mod, userId}) {
+function ModuleApp({mod, userId, orgId, membre, role}) {
   var cfg=MODULES[mod],PRE=mod+"_";
   var [clients,setClients]=useState([]);
   var [currentYear,setCurrentYear]=useState(new Date().getFullYear());
@@ -1357,8 +1606,9 @@ function ModuleApp({mod, userId}) {
       if(vals[5])setPlanning(vals[5]);
       if(vals[6])setView(vals[6]);
       setLoaded(true);
+    if(role !== 'admin') setView('planning');
       // Ensuite tenter Supabase (peut écraser localStorage si données plus récentes)
-      return loadClientsFromSupabase(mod, userId);
+      return loadClientsFromSupabase(mod, userId, orgId);
     })
     .then(function(supaClients){
       if(supaClients&&supaClients.length>0){
@@ -1369,7 +1619,7 @@ function ModuleApp({mod, userId}) {
     .catch(function(e){console.warn("Supabase load:",e);});
   },[mod]);
 
-  useEffect(function(){if(!loaded)return;try{localStorage.setItem("proplan_"+PRE+"clients",JSON.stringify(clients));}catch(e){}syncClientsToSupabase(clients,mod,userId);},[clients,loaded]);
+  useEffect(function(){if(!loaded)return;try{localStorage.setItem("proplan_"+PRE+"clients",JSON.stringify(clients));}catch(e){}syncClientsToSupabase(clients,mod,userId,orgId);},[clients,loaded]);
   useEffect(function(){if(!loaded)return;try{localStorage.setItem("proplan_"+PRE+"year",JSON.stringify(currentYear));}catch(e){};},[currentYear,loaded]);
   useEffect(function(){if(!loaded)return;try{localStorage.setItem("proplan_"+PRE+"ot",JSON.stringify(otMin));}catch(e){};},[otMin,loaded]);
   useEffect(function(){if(!loaded)return;try{localStorage.setItem("proplan_"+PRE+"techs",JSON.stringify(techs));}catch(e){};},[techs,loaded]);
@@ -1383,10 +1633,13 @@ function ModuleApp({mod, userId}) {
   var handleGenerate=function(){var pend=clients.filter(function(c){return c.status==="pending";});if(!pend.length)return;S.get(GEOCODE_KEY).then(function(coords){coords=coords||{};var jobFn=mod==="era"?function(c){var types=cfg.interventionTypes||[];var t=types.find(function(t){return t.id===c.interventionType;});return t?t.min:45;}:null;clearZoneCache();try{setPlanning(planifier(pend,otMin,jobFn,coords));setView("planning");}catch(err){alert("Erreur: "+err.message);}});};
   var handleCheck=function(id){setClients(function(prev){return prev.map(function(c){return c.id===id?Object.assign({},c,{status:"done",doneDate:today()}):c;});});setPlanning(function(prev){if(!prev)return null;return Object.assign({},prev,{journees:prev.journees.map(function(j){var sl=j.slots.filter(function(s){return s.clientId!==id;});return Object.assign({},j,{slots:sl,totalWork:sl.reduce(function(s2,s){return s2+s.dur;},0)});}).filter(function(j){return j.slots.length>0;})});});};
   var handlePartial=function(id,nbDone){setClients(function(prev){return prev.map(function(c){if(c.id!==id)return c;return Object.assign({},c,{nbrCaissons:Math.max(1,(c.nbrCaissons||1)-nbDone),status:"pending"});});});setPlanning(function(prev){if(!prev)return null;return Object.assign({},prev,{journees:prev.journees.map(function(j){var sl=j.slots.filter(function(s){return s.clientId!==id;});return Object.assign({},j,{slots:sl,totalWork:sl.reduce(function(s2,s){return s2+s.dur;},0)});}).filter(function(j){return j.slots.length>0;})});});};
-  var handleSetYear=function(y){if(y===currentYear)return;var cls=clients.map(function(c){var hist=(c.history||[]).slice();if(c.status==="done"){var already=hist.some(function(h){return h.year===currentYear;});if(!already)hist.push({year:currentYear,doneDate:c.doneDate||today(),nbrCaissons:c.nbrCaissons||1});}return Object.assign({},c,{status:c.status==="done"?"pending":c.status,doneDate:null,history:hist});});var snap=clients.filter(function(c){return c.status==="done";}).map(function(c){return{id:c.id,name:c.name,address:c.address,ville:c.ville,nbrCaissons:c.nbrCaissons||1,doneDate:c.doneDate};});try{localStorage.setItem("proplan_"+PRE+"archive_"+currentYear,JSON.stringify(snap));}catch(e){}syncArchiveToSupabase(mod,currentYear,snap,userId);syncClientsToSupabase(cls,mod,userId);setClients(cls);setCurrentYear(y);setPlanning(null);};
+  var handleSetYear=function(y){if(y===currentYear)return;var cls=clients.map(function(c){var hist=(c.history||[]).slice();if(c.status==="done"){var already=hist.some(function(h){return h.year===currentYear;});if(!already)hist.push({year:currentYear,doneDate:c.doneDate||today(),nbrCaissons:c.nbrCaissons||1});}return Object.assign({},c,{status:c.status==="done"?"pending":c.status,doneDate:null,history:hist});});var snap=clients.filter(function(c){return c.status==="done";}).map(function(c){return{id:c.id,name:c.name,address:c.address,ville:c.ville,nbrCaissons:c.nbrCaissons||1,doneDate:c.doneDate};});try{localStorage.setItem("proplan_"+PRE+"archive_"+currentYear,JSON.stringify(snap));}catch(e){}syncArchiveToSupabase(mod,currentYear,snap,userId,orgId);syncClientsToSupabase(cls,mod,userId);setClients(cls);setCurrentYear(y);setPlanning(null);};
 
   var pend=clients.filter(function(c){return c.status==="pending";}).length;
-  var NAV=[["dashboard","Dashboard"],["import","Import"],["clients","Clients"],["planning","Planning"],["carte","Carte"],["annees","Années"],["kizeo","Kizeo"]];
+  var isAdmin = role === "admin";
+  var NAV=isAdmin
+    ? [["dashboard","Dashboard"],["import","Import"],["clients","Clients"],["planning","Planning"],["carte","Carte"],["annees","Années"],["kizeo","Kizeo"],["membres","Membres"]]
+    : [["planning","Mes interventions"]];
 
   if(!loaded)return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"60vh",color:T.muted,fontSize:14,fontFamily:"monospace"}}>Chargement…</div>;
 
@@ -1409,6 +1662,8 @@ function ModuleApp({mod, userId}) {
       {view==="carte"&&<CarteView clients={clients} planning={planning}/>}
       {view==="annees"&&<AnneesView currentYear={currentYear} clients={clients} onNewYear={function(){handleSetYear(currentYear+1);}} onSetYear={handleSetYear} modPre={PRE}/>}
       {view==="kizeo"&&<KizeoView clients={clients} planning={planning} onCheck={handleCheck}/>}
+      {view==="membres"&&<MembresView membre={membre} orgId={orgId}/>}
+      {!isAdmin&&<TechView user={{id:userId}} membre={membre||{}} planning={planning} clients={clients} onCheck={handleCheck} onPartial={handlePartial}/>}
     </div>
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={function(e){if(e.target.files[0])handleFile(e.target.files[0]);}}/>
   </React.Fragment>;
@@ -1419,21 +1674,56 @@ export default function App() {
   var [mod,setMod]=useState("vmc");
   var [user,setUser]=useState(null);
   var [authChecked,setAuthChecked]=useState(false);
+  var [orgInfo,setOrgInfo]=useState(null);   // {org_id, role, org_name, invite_code}
+  var [membre,setMembre]=useState(null);
 
   useEffect(function(){
     if(loadSession()){
       var s=supa.auth.getSession();
-      if(s)setUser({email:s.email,id:s.userId});
+      if(s){
+        setUser({email:s.email,id:s.userId});
+        // Charger le membre depuis Supabase
+        getMyMembre(s.userId).then(function(m){
+          if(m){
+            setMembre(m);
+            // Charger le nom de l'orga
+            supa.from("organisations").select("*","&id=eq."+m.org_id).then(function(rows){
+              if(rows&&rows[0])setOrgInfo({org_id:m.org_id,role:m.role,org_name:rows[0].name,invite_code:rows[0].invite_code});
+            });
+          }
+        });
+      }
     }
     setAuthChecked(true);
   },[]);
 
+  var handleLogin=function(u){
+    setUser(u);
+    // Après login, chercher si l'user a déjà une orga
+    getMyMembre(u.id).then(function(m){
+      if(m){
+        setMembre(m);
+        supa.from("organisations").select("*","&id=eq."+m.org_id).then(function(rows){
+          if(rows&&rows[0])setOrgInfo({org_id:m.org_id,role:m.role,org_name:rows[0].name,invite_code:rows[0].invite_code});
+        });
+      }
+    });
+  };
+
+  var handleOrgReady=function(info){
+    setOrgInfo(info);
+    getMyMembre(user.id).then(function(m){setMembre(m);});
+  };
+
   var handleLogout=function(){
-    supa.auth.signOut().then(function(){setUser(null);});
+    supa.auth.signOut().then(function(){setUser(null);setOrgInfo(null);setMembre(null);});
   };
 
   if(!authChecked)return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg,color:T.muted,fontFamily:"'DM Sans',sans-serif"}}>…</div>;
-  if(!user)return <LoginScreen onLogin={function(u){setUser(u);}}/>;
+  if(!user)return <LoginScreen onLogin={handleLogin}/>;
+  if(!orgInfo)return <OrgSetup user={user} onReady={handleOrgReady}/>;
+
+  var isAdmin = orgInfo.role === "admin";
 
   return <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",background:T.bg}}>
     <style>{css}</style>
@@ -1441,20 +1731,25 @@ export default function App() {
       <div style={{display:"flex",alignItems:"center",gap:10,marginRight:24}}>
         <div style={{width:30,height:30,background:"linear-gradient(135deg,#6366f1,#8b5cf6)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:"white",fontSize:14,boxShadow:"0 2px 12px rgba(99,102,241,0.4)"}}>A</div>
         <div style={{fontWeight:700,fontSize:15,color:T.text,letterSpacing:"-0.01em"}}>AHMP</div>
+        {orgInfo.org_name&&<div style={{fontSize:11,color:T.muted,fontFamily:"monospace",background:"rgba(255,255,255,0.06)",padding:"2px 8px",borderRadius:4}}>{orgInfo.org_name}</div>}
         <div style={{width:"1px",height:16,background:T.border,margin:"0 4px"}}/>
       </div>
-      <div style={{display:"flex",gap:2}}>
+      {isAdmin&&<div style={{display:"flex",gap:2}}>
         {Object.values(MODULES).map(function(m){
           return <button key={m.id} onClick={function(){setMod(m.id);}} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 14px",border:"none",borderRadius:7,cursor:"pointer",fontFamily:"inherit",fontWeight:500,fontSize:13,background:mod===m.id?"rgba(99,102,241,0.15)":"transparent",color:mod===m.id?"#a5b4fc":T.muted,transition:"all 0.2s"}}>
             <span style={{fontSize:14}}>{m.emoji}</span>{m.label}
           </button>;
         })}
-      </div>
-      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
+      </div>}
+      {!isAdmin&&<div style={{fontSize:13,color:T.muted,fontWeight:500}}>
+        <Badge color="#10b981">Technicien</Badge>
+      </div>}
+      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:10}}>
         <span style={{color:T.muted,fontSize:12,fontFamily:"monospace"}}>{user.email}</span>
+        <Badge color={isAdmin?"#6366f1":"#10b981"}>{isAdmin?"Admin":"Tech"}</Badge>
         <Btn onClick={handleLogout} variant="ghost" size="sm">Déconnexion</Btn>
       </div>
     </header>
-    <ModuleApp key={mod+user.id} mod={mod} userId={user.id}/>
+    <ModuleApp key={mod+(orgInfo.org_id||user.id)} mod={mod} userId={user.id} orgId={orgInfo.org_id} membre={membre} role={orgInfo.role}/>
   </div>;
 }
