@@ -405,9 +405,11 @@ function OrgSetup({user, onReady}) {
 // ── Vue Technicien (lecture seule de ses journées) ────────────────────────────
 function TechView({user, membre, planning, clients, onCheck, onPartial}) {
   var myJournees = (planning&&planning.journees||[]).filter(function(j){
-    return j.techId === user.id || j.techName === membre.name;
+    return j.techId === user.id || j.techName === (membre&&membre.name);
   });
   var cMap={};clients.forEach(function(c){cMap[c.id]=c;});
+  var totalChantiers = myJournees.reduce(function(s,j){return s+j.slots.length;},0);
+  var doneChantiers = myJournees.reduce(function(s,j){return s+j.slots.filter(function(sl){var c=cMap[sl.clientId];return c&&c.status==="done";}).length;},0);
 
   if(!myJournees.length) return <div style={{textAlign:"center",padding:60,animation:"fadeIn 0.3s ease"}}>
     <div style={{fontSize:48,marginBottom:16}}>📋</div>
@@ -416,36 +418,101 @@ function TechView({user, membre, planning, clients, onCheck, onPartial}) {
   </div>;
 
   var JOUR_COLORS=["#6366f1","#8b5cf6","#06b6d4","#10b981","#f59e0b","#f97316","#ef4444","#ec4899"];
+
   return <div style={{animation:"fadeIn 0.3s ease"}}>
-    <div style={{marginBottom:24}}>
-      <div style={{fontSize:11,color:"#6366f1",fontWeight:600,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:6}}>Mes interventions</div>
-      <div style={{fontSize:26,fontWeight:700,color:T.text,letterSpacing:"-0.02em"}}>Bonjour 👋</div>
-      <div style={{fontSize:13,color:T.muted,marginTop:4}}>{myJournees.length} journée{myJournees.length>1?"s":""} · {myJournees.reduce(function(s,j){return s+j.slots.length;},0)} chantiers</div>
+    <div style={{marginBottom:22}}>
+      <div style={{fontSize:26,fontWeight:700,color:T.text,letterSpacing:"-0.02em",marginBottom:4}}>Mes interventions 👋</div>
+      <div style={{fontSize:13,color:T.muted}}>{myJournees.length} journée{myJournees.length>1?"s":""} · {totalChantiers} chantiers</div>
     </div>
+
+    {/* Progression globale */}
+    {totalChantiers>0&&<Card padding="16px 20px" style={{marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <span style={{fontSize:12,color:T.muted}}>Progression du jour</span>
+        <span style={{fontSize:13,fontWeight:700,color:T.text}}>{doneChantiers}/{totalChantiers}</span>
+      </div>
+      <ProgressBar value={doneChantiers} max={totalChantiers} color="#10b981"/>
+    </Card>}
+
     {myJournees.map(function(j,ji){
       var color=JOUR_COLORS[ji%JOUR_COLORS.length];
       var tw=j.totalWork,hh=Math.floor(tw/60),mm=String(tw%60).padStart(2,"0");
+      var nbc=j.slots.reduce(function(s,sl){return s+(sl.nbrCaissons||1);},0);
       return <div key={j.id} style={{background:T.bgCard,border:"1px solid "+T.border,borderRadius:14,marginBottom:12,overflow:"hidden"}}>
         <div style={{padding:"14px 18px",borderBottom:"1px solid "+T.border,background:"rgba(255,255,255,0.02)"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
             <div style={{width:3,height:22,background:color,borderRadius:2}}/>
             <span style={{fontWeight:700,fontSize:14,color:T.text}}>Journée {j.num}</span>
             {j.overtime&&<Badge color="#ef4444">Heures supp.</Badge>}
           </div>
-          <div style={{fontSize:11,color:T.muted,fontFamily:"monospace"}}>
-            {j.slots.length} chantiers · {hh}h{mm} · fin {j.finHeure}
-            {j.departTime&&<> · départ {j.departTime}</>}
+          <div style={{fontSize:12,color:T.muted,fontFamily:"monospace"}}>
+            {j.slots.length} chantiers · {nbc} caissons · {hh}h{mm} · fin {j.finHeure}
+            {j.departTime&&<> · départ <strong style={{color:T.text}}>{j.departTime}</strong></>}
           </div>
         </div>
         <div style={{padding:"10px 14px"}}>
           {j.slots.map(function(sl,si){
             var c=cMap[sl.clientId];
             if(!c)return null;
-            return <SlotRow key={j.id+"-"+si} slot={sl} client={c} onCheck={onCheck} onPartial={onPartial} onEdit={function(){}}/>;
+            var isDone=c.status==="done";
+            return <div key={j.id+"-"+si} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",marginBottom:4,borderRadius:8,background:isDone?"rgba(16,185,129,0.08)":"rgba(255,255,255,0.03)",border:"1px solid "+(isDone?"rgba(16,185,129,0.25)":T.border),transition:"all 0.2s"}}>
+              {/* Heure */}
+              <div style={{minWidth:70,textAlign:"center"}}>
+                <div style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:isDone?T.muted:T.text,background:"rgba(255,255,255,0.06)",borderRadius:5,padding:"3px 7px",textDecoration:isDone?"line-through":""}}>{sl.startClock}</div>
+                <div style={{fontFamily:"monospace",fontSize:9,color:T.faint,marginTop:1}}>{sl.endClock}</div>
+              </div>
+              {/* Infos client */}
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:600,fontSize:13,color:isDone?T.muted:T.text,textDecoration:isDone?"line-through":""}}>{c.name}</div>
+                <div style={{fontSize:11,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.address}</div>
+              </div>
+              {/* Caissons */}
+              <div style={{flexShrink:0,textAlign:"center"}}>
+                <div style={{fontSize:11,color:sl.zoneCol,background:sl.zoneCol+"15",borderRadius:4,padding:"2px 8px",fontWeight:600}}>{sl.nbrCaissons}c</div>
+              </div>
+              {/* Bouton valider */}
+              {!isDone&&<div style={{flexShrink:0}}>
+                <TechValidateBtn slot={sl} client={c} onCheck={onCheck} onPartial={onPartial}/>
+              </div>}
+              {isDone&&<div style={{flexShrink:0,width:32,height:32,borderRadius:"50%",background:"rgba(16,185,129,0.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>✓</div>}
+            </div>;
           })}
         </div>
       </div>;
     })}
+  </div>;
+}
+
+// Bouton de validation simplifié pour technicien
+function TechValidateBtn({slot, client, onCheck, onPartial}) {
+  var [open, setOpen] = useState(false);
+  var [nb, setNb] = useState(slot.nbrCaissons);
+  var total = slot.nbrCaissons;
+
+  if(!open) return <button onClick={function(){setOpen(true);}} style={{width:32,height:32,borderRadius:"50%",background:"rgba(16,185,129,0.15)",border:"1.5px solid rgba(16,185,129,0.4)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,transition:"all 0.15s"}}
+    onMouseEnter={function(e){e.currentTarget.style.background="rgba(16,185,129,0.3)";}}
+    onMouseLeave={function(e){e.currentTarget.style.background="rgba(16,185,129,0.15)";}}>✓</button>;
+
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={function(){setOpen(false);}}>
+    <div style={{background:"#1a1a24",border:"1px solid rgba(255,255,255,0.12)",borderRadius:16,padding:24,width:"100%",maxWidth:340,boxShadow:"0 24px 64px rgba(0,0,0,0.6)",animation:"fadeIn 0.2s ease"}} onClick={function(e){e.stopPropagation();}}>
+      <div style={{textAlign:"center",marginBottom:20}}>
+        <div style={{fontWeight:700,fontSize:16,color:T.text,marginBottom:4}}>{client.name}</div>
+        <div style={{fontSize:12,color:T.muted}}>{client.address}</div>
+      </div>
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:12,color:T.muted,textAlign:"center",marginBottom:10}}>Combien de caissons réalisés ?</div>
+        <div style={{display:"flex",justifyContent:"center",gap:8}}>
+          {Array.from({length:total},function(_,i){return i+1;}).map(function(n){
+            return <button key={n} onClick={function(){setNb(n);}} style={{width:44,height:44,borderRadius:9,border:"1.5px solid "+(nb===n?"transparent":T.border),cursor:"pointer",fontWeight:700,fontSize:16,background:nb===n?(n===total?"#10b981":"#f59e0b"):"rgba(255,255,255,0.04)",color:nb===n?"white":T.text,fontFamily:"inherit",transition:"all 0.15s"}}>{n}</button>;
+          })}
+        </div>
+        {total>1&&<div style={{textAlign:"center",fontSize:11,color:T.muted,marginTop:8}}>Total prévu : {total} caisson{total>1?"s":""}</div>}
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <Btn onClick={function(){setOpen(false);}} variant="ghost" style={{flex:1,justifyContent:"center"}}>Annuler</Btn>
+        <Btn onClick={function(){if(nb>=total)onCheck(client.id);else onPartial(client.id,nb);setOpen(false);}} variant="success" style={{flex:1,justifyContent:"center"}}>{nb<total?"Valider (partiel)":"Valider ✓"}</Btn>
+      </div>
+    </div>
   </div>;
 }
 
@@ -1655,14 +1722,14 @@ function ModuleApp({mod, userId, orgId, membre, role}) {
       {pend>0&&<div style={{marginLeft:"auto",background:"rgba(99,102,241,0.2)",color:"#a5b4fc",borderRadius:6,padding:"2px 9px",fontFamily:"monospace",fontSize:11,fontWeight:600}}>{pend}</div>}
     </nav>
     <div style={{maxWidth:900,margin:"0 auto",padding:"28px 20px"}}>
-      {view==="dashboard"&&<Dashboard clients={clients} planning={planning} currentYear={currentYear} onImport={function(){setView("import");}} onPlan={handleGenerate} onNewYear={function(){handleSetYear(currentYear+1);}} onCarte={function(){setView("carte");}}/>}
-      {view==="import"&&<ImportView onConfirm={handleConfirmImport} fileRef={fileRef} loading={impLoading} error={impError} result={impResult} pending={impPending} onReset={handleResetImport} onDrop={function(e){e.preventDefault();var f=e.dataTransfer.files[0];if(f)handleFile(f);}}/>}
-      {view==="clients"&&<ClientsView clients={clients} setClients={setClients}/>}
-      {view==="planning"&&<PlanningView clients={clients} setClients={setClients} planning={planning} setPlanning={setPlanning} otMin={otMin} setOtMin={setOtMin} onGenerate={handleGenerate} onCheck={handleCheck} onPartial={handlePartial} techs={techs} setTechs={setTechs} journeeDates={journeeDates} setJourneeDate={function(jId,date){setJourneeDates(function(prev){var n=Object.assign({},prev);n[jId]=date;return n;});}}/>}
-      {view==="carte"&&<CarteView clients={clients} planning={planning}/>}
-      {view==="annees"&&<AnneesView currentYear={currentYear} clients={clients} onNewYear={function(){handleSetYear(currentYear+1);}} onSetYear={handleSetYear} modPre={PRE}/>}
-      {view==="kizeo"&&<KizeoView clients={clients} planning={planning} onCheck={handleCheck}/>}
-      {view==="membres"&&<MembresView membre={membre} orgId={orgId}/>}
+      {isAdmin&&view==="dashboard"&&<Dashboard clients={clients} planning={planning} currentYear={currentYear} onImport={function(){setView("import");}} onPlan={handleGenerate} onNewYear={function(){handleSetYear(currentYear+1);}} onCarte={function(){setView("carte");}}/>}
+      {isAdmin&&view==="import"&&<ImportView onConfirm={handleConfirmImport} fileRef={fileRef} loading={impLoading} error={impError} result={impResult} pending={impPending} onReset={handleResetImport} onDrop={function(e){e.preventDefault();var f=e.dataTransfer.files[0];if(f)handleFile(f);}}/>}
+      {isAdmin&&view==="clients"&&<ClientsView clients={clients} setClients={setClients}/>}
+      {isAdmin&&view==="planning"&&<PlanningView clients={clients} setClients={setClients} planning={planning} setPlanning={setPlanning} otMin={otMin} setOtMin={setOtMin} onGenerate={handleGenerate} onCheck={handleCheck} onPartial={handlePartial} techs={techs} setTechs={setTechs} journeeDates={journeeDates} setJourneeDate={function(jId,date){setJourneeDates(function(prev){var n=Object.assign({},prev);n[jId]=date;return n;});}}/>}
+      {isAdmin&&view==="carte"&&<CarteView clients={clients} planning={planning}/>}
+      {isAdmin&&view==="annees"&&<AnneesView currentYear={currentYear} clients={clients} onNewYear={function(){handleSetYear(currentYear+1);}} onSetYear={handleSetYear} modPre={PRE}/>}
+      {isAdmin&&view==="kizeo"&&<KizeoView clients={clients} planning={planning} onCheck={handleCheck}/>}
+      {isAdmin&&view==="membres"&&<MembresView membre={membre} orgId={orgId}/>}
       {!isAdmin&&<TechView user={{id:userId}} membre={membre||{}} planning={planning} clients={clients} onCheck={handleCheck} onPartial={handlePartial}/>}
     </div>
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={function(e){if(e.target.files[0])handleFile(e.target.files[0]);}}/>
